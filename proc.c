@@ -6,6 +6,8 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "rand.h"
+#include "date.h"
 
 struct {
   struct spinlock lock;
@@ -24,6 +26,7 @@ void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+  sgenrand(unixtime());
 }
 
 //PAGEBREAK: 32
@@ -47,6 +50,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->tickets = 20;   // by default give 20 ticket to a new process
   release(&ptable.lock);
 
   // Allocate kernel stack.
@@ -55,11 +59,11 @@ found:
     return 0;
   }
   sp = p->kstack + KSTACKSIZE;
-  
+
   // Leave room for trap frame.
   sp -= sizeof *p->tf;
   p->tf = (struct trapframe*)sp;
-  
+
   // Set up new context to start executing at forkret,
   // which returns to trapret.
   sp -= 4;
@@ -80,7 +84,7 @@ userinit(void)
 {
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
-  
+
   p = allocproc();
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
@@ -108,7 +112,7 @@ int
 growproc(int n)
 {
   uint sz;
-  
+
   sz = proc->sz;
   if(n > 0){
     if((sz = allocuvm(proc->pgdir, sz, sz + n)) == 0)
@@ -155,14 +159,14 @@ fork(void)
   np->cwd = idup(proc->cwd);
 
   safestrcpy(np->name, proc->name, sizeof(proc->name));
- 
+
   pid = np->pid;
 
   // lock to force the compiler to emit the np->state write last.
   acquire(&ptable.lock);
   np->state = RUNNABLE;
   release(&ptable.lock);
-  
+
   return pid;
 }
 
@@ -254,6 +258,24 @@ wait(void)
   }
 }
 
+//function to calculate the total tickets of all runnable process.
+
+int
+lottery_total_no(void){
+  struct proc *p;
+  int tickets_sum = 0;
+
+// looping to sum the tickets of all the runnable process
+
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+  {
+    if(p->state == RUNNABLE) {
+      tickets_sum += p->tickets;
+    }
+  }
+return tickets_sum;
+}
+
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -262,25 +284,45 @@ wait(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
+
+
+
 void
 scheduler(void)
 {
   struct proc *p;
-  int foundproc = 1;
+  int foundproc = 1;  //set flag if the process is found
+  int counter;   // the number of  tickets has been countered
+  int total_no_tickets;
+  long winner_tickets;  // the chosen lottery tickets
 
   for(;;){
     // Enable interrupts on this processor.
     sti();
-
+    counter = 0;
+    total_no_tickets = 0;
     if (!foundproc) hlt();
-
     foundproc = 0;
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+    //resetting
+    counter = 0;
+
+    total_no_tickets = 0;
+
+    total_no_tickets = lottery_total_no();
+
+    winner_tickets = random_at_most(total_no_tickets);
+
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
+
+      if ((counter + p->tickets) < winner_tickets) {
+        counter += p->tickets;
+        continue;
+      }
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
@@ -295,6 +337,7 @@ scheduler(void)
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       proc = 0;
+      break;   // stop looping when the winner process is found
     }
     release(&ptable.lock);
 
@@ -453,7 +496,7 @@ procdump(void)
   struct proc *p;
   char *state;
   uint pc[10];
-  
+
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->state == UNUSED)
       continue;
@@ -461,7 +504,7 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    cprintf("%d %s %s", p->pid, state, p->name);
+    cprintf("%d %s %s", p->pid, state, p->name, p->tickets);
     if(p->state == SLEEPING){
       getcallerpcs((uint*)p->context->ebp+2, pc);
       for(i=0; i<10 && pc[i] != 0; i++)
